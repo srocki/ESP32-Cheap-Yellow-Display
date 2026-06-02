@@ -36,6 +36,7 @@ StopData stops[MAX_STOPS];
 int stopCount = 0;
 volatile bool dataReady  = false;
 volatile bool needRedraw = false;
+volatile unsigned long lastFetchMs = 0;
 SemaphoreHandle_t dataMutex = nullptr;
 
 // Parse "2026-06-01T06:33:30.578000+08:00" as HKT → return UTC time_t
@@ -120,8 +121,9 @@ bool fetchData() {
 void fetchTask(void*) {
     while (true) {
         if (fetchData()) {
-            dataReady  = true;
-            needRedraw = true;
+            lastFetchMs = millis();
+            dataReady   = true;
+            needRedraw  = true;
         }
         vTaskDelay(pdMS_TO_TICKS(FETCH_INTERVAL_MS));
     }
@@ -170,7 +172,15 @@ void drawHeader() {
     tft.setTextColor(TFT_CYAN, bg);
     tft.drawString("HK Bus", 50, 7, 2);
     tft.drawRightString(buf, SCREEN_W - 4, 7, 2);
-    tft.drawFastHLine(0, HEADER_H, SCREEN_W, tft.color565(55, 55, 105));
+
+    // Refresh countdown bar (2px, replaces static separator)
+    tft.fillRect(0, HEADER_H, SCREEN_W, 2, tft.color565(25, 25, 45));  // track
+    if (lastFetchMs > 0) {
+        unsigned long elapsed = millis() - lastFetchMs;
+        int barW = elapsed >= FETCH_INTERVAL_MS ? 0
+                 : (int)((long)(FETCH_INTERVAL_MS - elapsed) * SCREEN_W / FETCH_INTERVAL_MS);
+        if (barW > 0) tft.fillRect(0, HEADER_H, barW, 2, tft.color565(70, 70, 160));
+    }
 }
 
 void drawStops() {
@@ -262,23 +272,30 @@ void setup() {
     tft.setRotation(1);
     tft.fillScreen(TFT_BLACK);
 
-    logLine("Connecting to WiFi...");
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries++ < 40) delay(500);
-
-    if (WiFi.status() != WL_CONNECTED) {
+    bool connected = false;
+    int netCount = sizeof(WIFI_SSIDS) / sizeof(WIFI_SSIDS[0]);
+    for (int n = 0; n < netCount && !connected; n++) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Trying: %s", WIFI_SSIDS[n]);
+        logLine(msg);
+        WiFi.begin(WIFI_SSIDS[n], WIFI_PASSES[n]);
+        int tries = 0;
+        while (WiFi.status() != WL_CONNECTED && tries++ < 20) delay(500);
+        if (WiFi.status() == WL_CONNECTED) connected = true;
+        else WiFi.disconnect(true);
+    }
+    if (!connected) {
         logLine("WiFi failed!", TFT_RED);
         while (true) delay(1000);
     }
     char connMsg[48];
-    snprintf(connMsg, sizeof(connMsg), "WiFi: %s", WiFi.SSID().c_str());
+    snprintf(connMsg, sizeof(connMsg), "Connected: %s", WiFi.SSID().c_str());
     logLine(connMsg, TFT_GREEN);
 
     logLine("Syncing time (NTP)...");
     configTime(0, 0, NTP_SERVER);
     time_t now = 0;
-    tries = 0;
+    int tries = 0;
     while (now < 1000000000UL && tries++ < 40) {
         delay(500);
         now = time(nullptr);
